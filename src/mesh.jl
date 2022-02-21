@@ -96,9 +96,20 @@ function create_buffers(type, mesh::DistributedMesh{D}) where D
     return recv_buffer, copy(recv_buffer)
 end
 
+function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, mesh::DistributedMesh{D}) where {T,D,N}
+    recv_buffer, send_buffer = create_buffers(T, mesh)
+    update_halo!(arrays, recv_buffer, send_buffer, mesh)
+end
+
 function update_halo!(array::AbstractArray{T,D}, mesh::DistributedMesh{D}) where {T,D}
     recv_buffer, send_buffer = create_buffers(T, mesh)
     update_halo!(array, recv_buffer, send_buffer, mesh)
+end
+
+function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{Int,Vector{T}}, send_buffer::Dict{Int,Vector{T}}, mesh::DistributedMesh{D}) where {T,D,N}
+    for array in arrays
+        update_halo!(array, recv_buffer, send_buffer, mesh)
+    end
 end
 
 function update_halo!(array::AbstractArray{T,D}, recv_buffer::Dict{Int,Vector{T}}, send_buffer::Dict{Int,Vector{T}}, mesh::DistributedMesh{D}) where {T,D}
