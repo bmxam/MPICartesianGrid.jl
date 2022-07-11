@@ -1,4 +1,4 @@
-name = "MPIStructuredMesh"
+name = "MPICartesianGrid"
 uuid = "c2eb19a3-d03d-4b61-acb7-ce23f054b9c0"
 authors = ["bmxam <maxime.bouyges@gmail.com>"]
 version = "0.1.0"
