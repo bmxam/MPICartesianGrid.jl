@@ -1,5 +1,8 @@
 """
 Run this 2D-demo with 4 procs : mpirun -n 4 julia demo_2D.jl
+
+This demo synchronizes only one array. To synchronize multiple arrays, just use the same `update_halo!` method
+with a `Tuple` of `Array`.
 """
 module demo
 using MPIStructuredMesh
@@ -22,7 +25,7 @@ function display_array(array, mesh)
 end
 
 # Build mesh
-n = (4, 3) # Number of elements in each space directions
+n = (4, 3) # Number of elements in each space directions on each processor
 ndims = (2, 2) # Number of processors in each space direction
 noverlaps = (2,1) # Number of elements overlap (on both side) in each space direction
 mesh = DistributedMesh(ndims, n, noverlaps)

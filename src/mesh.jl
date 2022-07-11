@@ -1,5 +1,5 @@
 """
-The structure could be mush lighter if we interrogate MPI to query infos (rank, etc) instead of storing
+Remark : the structure could lighter if we interrogate MPI to query infos (rank, etc) instead of storing
 them here.
 """
 struct DistributedMesh{D}
@@ -9,7 +9,6 @@ struct DistributedMesh{D}
     nelts::NTuple{D,Int} # Number of elts of the local mesh in each direction, without halo
     noverlaps::NTuple{D,Int} # Number of overlap elements in each direction
     coords2rank::AbstractArray{Int,D} # MPI coordinates (1-based) to MPI rank (identical to MPI.Cart_rank)
-    rank::Int # MPI rank (0-based)
 end
 
 @inline get_comm(mesh::DistributedMesh) = mesh.comm
@@ -20,7 +19,7 @@ end
 @inline get_noverlaps(mesh::DistributedMesh) = mesh.noverlaps
 @inline get_noverlap(mesh::DistributedMesh, d::Int) = mesh.noverlaps[d]
 
-@inline get_rank(mesh::DistributedMesh) = mesh.rank
+@inline get_rank(mesh::DistributedMesh) = MPI.Comm_rank(get_comm(mesh))
 @inline get_rank(coords::Vector{Int}, mesh::DistributedMesh) = mesh.coords2rank[coords]
 @inline get_rank(coords::NTuple{D,Int}, mesh::DistributedMesh{D}) where D = mesh.coords2rank[coords...]
 @inline neighbors(::DistributedMesh{D}) where D = ntuple(d -> -1:1, D)
@@ -34,7 +33,13 @@ end
 @inline local_indices(mesh::DistributedMesh{D}) where D = ntuple(d -> range(mesh.noverlaps[d]+1, mesh.nelts[d] + mesh.noverlaps[d]), D)
 @inline local_indices(mesh::DistributedMesh{D}, d::Int) where D = range(mesh.noverlaps[d]+1, mesh.nelts[d] + mesh.noverlaps[d])
 
+"""
+    DistributedMesh(ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::NTuple{D,Int}; init_MPI = true) where D
 
+`D` is the number of spatial dimensions. `ndims` is the number of processors in each spatial dimension. `nelts` is the number of grid elements
+in each spatial dimension on each core (hence the total number of grid elements is `sum(ndims .* nelts)`). Finally,
+`noverlaps` is the number of elements overlaps (on both side of the spatial direction) in each space direction.
+"""
 function DistributedMesh(ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::NTuple{D,Int}; init_MPI = true) where D
     # Init MPI if necessary
     init_MPI && MPI.Init()
@@ -62,14 +67,16 @@ function DistributedMesh(comm::MPI.Comm, ndims::NTuple{D,Int}, nelts::NTuple{D,I
     coords = MPI.Cart_coords(comm) # 0-based
     coords = ntuple(d -> coords[d] + 1, D) # NTuple, 1-based
 
-    # Get rank
-    rank = MPI.Comm_rank(comm)
-
-    DistributedMesh{D}(comm, ndims, coords, nelts, noverlaps, coords2rank, rank)
+    DistributedMesh{D}(comm, ndims, coords, nelts, noverlaps, coords2rank)
 end
 DistributedMesh(comm::MPI.Comm, ndims::Int, nelts::Int, noverlaps::Int; init_MPI = true) = DistributedMesh(comm, (ndims,), (nelts,), (noverlaps,);  init_MPI)
 
-function create_buffers(type, mesh::DistributedMesh{D}) where D
+"""
+    create_buffers(type, mesh::DistributedMesh{D}, narrays::Int = 1) where D
+
+Create send/recv buffers for MPI exchange of `Array`'s of type `type`.
+"""
+function create_buffers(mesh::DistributedMesh{D}, type, narrays::Int = 1) where D
     coords = get_coords(mesh)
     recv_buffer = Dict{Int,Vector{type}}()
 
@@ -81,38 +88,56 @@ function create_buffers(type, mesh::DistributedMesh{D}) where D
         _is_true_neighbor(neighbor, stencil, mesh) || continue
 
         # Compute buffer size
-        n = 1
+        bufferSize = 1
         for d in 1:D
-            n *= stencil[d] == 0 ? get_nelts(mesh, d) : get_noverlap(mesh, d)
+            bufferSize *= stencil[d] == 0 ? get_nelts(mesh, d) : get_noverlap(mesh, d)
         end
 
         # Determine src rank
         src = get_rank(neighbor, mesh)
 
         # Allocate and store buffer
-        recv_buffer[src] = zeros(type, n)
+        recv_buffer[src] = zeros(type, bufferSize * narrays)
     end
 
     return recv_buffer, copy(recv_buffer)
 end
+create_buffers(mesh::DistributedMesh{D}, ::NTuple{N,AbstractArray{T,D}}) where {D,T,N} = create_buffers(mesh, T, N)
+create_buffers(mesh::DistributedMesh{D}, ::AbstractArray{T,D}) where {D,T} = create_buffers(mesh, T)
 
+"""
+    update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, mesh::DistributedMesh{D}) where {T,D,N}
+
+Update the halo (=border, in each dimension) of each array of the input `arrays`.
+
+No buffer are required, they will be created. If you want to reuse buffers, check the other `update_halo!`
+functions.
+"""
 function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, mesh::DistributedMesh{D}) where {T,D,N}
-    recv_buffer, send_buffer = create_buffers(T, mesh)
+    recv_buffer, send_buffer = create_buffers(mesh, T, N)
     update_halo!(arrays, recv_buffer, send_buffer, mesh)
 end
 
+"""
+    update_halo!(array::AbstractArray{T,D}, mesh::DistributedMesh{D}) where {T,D}
+
+Update the halo (=border, in each dimension) of the input `array`.
+
+No buffer are required, they will be created. If you want to reuse buffers, check the other `update_halo!`
+functions.
+"""
 function update_halo!(array::AbstractArray{T,D}, mesh::DistributedMesh{D}) where {T,D}
-    recv_buffer, send_buffer = create_buffers(T, mesh)
-    update_halo!(array, recv_buffer, send_buffer, mesh)
+    update_halo!((array, ), mesh)
 end
 
+"""
+    update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{Int,Vector{T}}, send_buffer::Dict{Int,Vector{T}}, mesh::DistributedMesh{D}) where {T,D,N}
+
+Update the halo (=border, in each dimension) of the input `array`.
+
+Buffers need to be provided.
+"""
 function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{Int,Vector{T}}, send_buffer::Dict{Int,Vector{T}}, mesh::DistributedMesh{D}) where {T,D,N}
-    for array in arrays
-        update_halo!(array, recv_buffer, send_buffer, mesh)
-    end
-end
-
-function update_halo!(array::AbstractArray{T,D}, recv_buffer::Dict{Int,Vector{T}}, send_buffer::Dict{Int,Vector{T}}, mesh::DistributedMesh{D}) where {T,D}
     comm = get_comm(mesh)
     coords = get_coords(mesh)
 
@@ -145,7 +170,7 @@ function update_halo!(array::AbstractArray{T,D}, recv_buffer::Dict{Int,Vector{T}
         # Fill buffer
         dst = get_rank(neighbor, mesh)
         buffer = send_buffer[dst]
-        _array2buffer!(buffer, array, stencil, mesh)
+        _arrays2buffer!(buffer, arrays, stencil, mesh)
 
         # Execute request
         push!(send_reqs, MPI.Isend(buffer, dst, 0, comm))
@@ -165,14 +190,14 @@ function update_halo!(array::AbstractArray{T,D}, recv_buffer::Dict{Int,Vector{T}
         # Execute request
         src = get_rank(neighbor, mesh)
         buffer = recv_buffer[src]
-        _buffer2array!(buffer, array, stencil, mesh)
+        _buffer2arrays!(buffer, arrays, stencil, mesh)
     end
 end
 
 """
-Copy a part of the `array` into the sending `buffer`. The target is defined by the stencil.
+Copy a part of the `arrays` (same for all arrays) into the sending `buffer`. The target is defined by the stencil.
 """
-function _array2buffer!(buffer::Vector{T}, array::AbstractArray{T,D}, stencil::NTuple{D,Int}, mesh::DistributedMesh{D}) where {D,T}
+function _arrays2buffer!(buffer::Vector{T}, arrays::NTuple{N,AbstractArray{T,D}}, stencil::NTuple{D,Int}, mesh::DistributedMesh{D}) where {D,T,N}
     n = get_nelts(mesh)
     noverlaps = get_noverlaps(mesh)
 
@@ -185,16 +210,20 @@ function _array2buffer!(buffer::Vector{T}, array::AbstractArray{T,D}, stencil::N
         D
     )
 
-    # Copy to buffer
+    # Copy to buffer. Depending on the stencil, there might be zero, one, several elements of each dimension
+    # of each array to copy in the buffer. Array elements are interlaced this way in the buffer:
+    # buffer = [array1[1,2], array2[1,2], array3[1,2], array1[7,4], array2[7,4], array3[7,4], ....]
     for (i,ind) in enumerate(Iterators.product(rh...))
-        buffer[i] = array[ind...]
+        for (iarray, array) in enumerate(arrays)
+            buffer[iarray + (i-1)*N] = array[ind...]
+        end
     end
 end
 
 """
-Copy the content of the received `buffer` into the `array`. The source is designated by the `stencil`.
+Copy the content of the received `buffer` into the `arrays`. The source is designated by the `stencil`.
 """
-function _buffer2array!(buffer::Vector{T}, array::AbstractArray{T,D}, stencil::NTuple{D,Int}, mesh::DistributedMesh{D}) where {D,T}
+function _buffer2arrays!(buffer::Vector{T}, arrays::NTuple{N,AbstractArray{T,D}}, stencil::NTuple{D,Int}, mesh::DistributedMesh{D}) where {D,T,N}
     nelts_h = nelts_with_halo(mesh)
 
     # Gather all elements index to copy into array
@@ -206,9 +235,12 @@ function _buffer2array!(buffer::Vector{T}, array::AbstractArray{T,D}, stencil::N
         D
     )
 
-    # Copy from buffer
+    # Copy from buffer. Array elements are interlaced this way in the buffer:
+    # buffer = [array1[1,2], array2[1,2], array3[1,2], array1[7,4], array2[7,4], array3[7,4], ....]
     for (i,ind) in enumerate(Iterators.product(rh...))
-        array[ind...] = buffer[i]
+        for (iarray, array) in enumerate(arrays)
+            array[ind...] = buffer[iarray + (i-1)*N]
+        end
     end
 end
 
