@@ -53,6 +53,7 @@ end
 DistributedGrid(ndims::Int, nelts::Int, noverlaps::Int; init_MPI = true) = DistributedGrid((ndims,), (nelts,), (noverlaps,);  init_MPI)
 
 function DistributedGrid(comm::MPI.Comm, ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::NTuple{D,Int}) where D
+    @assert all(noverlaps .> 0) "Minimum overlap value is 1"
 
     # Determine map between coords and rank (MPI knows this map but I am not sure if it's fast or not)
     coords2rank = zeros(Int, ndims...)
