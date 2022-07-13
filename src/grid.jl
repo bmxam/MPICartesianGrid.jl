@@ -22,7 +22,13 @@ end
 @inline get_rank(grid::DistributedGrid) = MPI.Comm_rank(get_comm(grid))
 @inline get_rank(coords::Vector{Int}, grid::DistributedGrid) = grid.coords2rank[coords]
 @inline get_rank(coords::NTuple{D,Int}, grid::DistributedGrid{D}) where D = grid.coords2rank[coords...]
-@inline neighbors(::DistributedGrid{D}) where D = ntuple(d -> -1:1, D)
+
+"""
+    neighbors(::DistributedGrid{D}) where D
+
+Iterators with neighbors stencil (in local reference, i.e `-1:1`) including the current position.
+"""
+@inline neighbors(::DistributedGrid{D}) where D = Iterators.product(ntuple(d -> -1:1, D)...)
 
 @inline get_nelts(grid::DistributedGrid) = grid.nelts
 @inline get_nelts(grid::DistributedGrid, d::Int) = grid.nelts[d]
@@ -44,7 +50,13 @@ function DistributedGrid(ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::
     # Init MPI if necessary
     init_MPI && MPI.Init()
 
+    # Preliminary check
+    navail = MPI.Comm_size(MPI.COMM_WORLD)
+    nexpected = prod(ndims)
+    @assert navail == nexpected "The existed number of processors is $navail, the expected number is $nexpected (according to `ndims`)"
+
     # Create comm
+    #comm = MPI.Cart_create(MPI.COMM_WORLD, [d for d in ndims]) # future version of MPI.jl
     comm = MPI.Cart_create(MPI.COMM_WORLD, [d for d in ndims], [0 for _ in ndims], false)
 
     # Build grid
@@ -76,19 +88,33 @@ DistributedGrid(comm::MPI.Comm, ndims::Int, nelts::Int, noverlaps::Int; init_MPI
     create_buffers(type, grid::DistributedGrid{D}, narrays::Int = 1) where D
 
 Create send/recv buffers for MPI exchange of `Array`'s of type `type`.
+
+`narrays` is the number of arrays that will be exchanged.
 """
 function create_buffers(grid::DistributedGrid{D}, type, narrays::Int = 1) where D
     coords = get_coords(grid)
     recv_buffer = Dict{Int,Vector{type}}()
 
     #- Loop over dimensions
-    for stencil in Iterators.product(neighbors(grid)...)
+    for stencil in neighbors(grid)
         neighbor = coords .+ stencil
 
         # Jump to next neighbor if the present neighbor is not a real one
         _is_true_neighbor(neighbor, stencil, grid) || continue
 
         # Compute buffer size
+        # For each dimension:
+        # * if the `stencil[d] == 0`, i.e the considered neighbor is,
+        #   for this dimension, on the same "level", then the buffer size equals the number
+        #   of elements in this direction.
+        # * otherwise, the buffer is just the overlap
+        # Then the final size is the product of the different buffer sizes.
+        #
+        # Draw the situation in 2D to understand :
+        # * for neighbors in the x-direction (left/right neighbors), the number of elements to exchange
+        #   in the y-direction is ny. However for the number of elements to exhange in the x-direction is
+        #   just the overlap in the x-direction.
+        # * same way for neighbors in x-direction
         bufferSize = 1
         for d in 1:D
             bufferSize *= stencil[d] == 0 ? get_nelts(grid, d) : get_noverlap(grid, d)
@@ -146,7 +172,7 @@ function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{In
     recv_reqs = MPI.Request[]
 
     #- Loop over dimensions
-    for stencil in Iterators.product(neighbors(grid)...)
+    for stencil in neighbors(grid)
         neighbor = coords .+ stencil
 
         # Jump to next neighbor if the present neighbor is not a real one
@@ -162,7 +188,7 @@ function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{In
     send_reqs = MPI.Request[]
 
     #- Loop over dimensions
-    for stencil in Iterators.product(neighbors(grid)...)
+    for stencil in neighbors(grid)
         neighbor = coords .+ stencil
 
         # Jump to next neighbor if the present neighbor is not a real one
@@ -182,13 +208,13 @@ function update_halo!(arrays::NTuple{N,AbstractArray{T,D}}, recv_buffer::Dict{In
 
     # Copy from received buffer to array
     #- Loop over dimensions
-    for stencil in Iterators.product(neighbors(grid)...)
+    for stencil in neighbors(grid)
         neighbor = coords .+ stencil
 
         # Jump to next neighbor if the present neighbor is not a real one
         _is_true_neighbor(neighbor, stencil, grid) || continue
 
-        # Execute request
+        # Copy to array from received buffer
         src = get_rank(neighbor, grid)
         buffer = recv_buffer[src]
         _buffer2arrays!(buffer, arrays, stencil, grid)
