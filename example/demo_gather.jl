@@ -5,19 +5,25 @@ This demo synchronizes only one array. To synchronize multiple arrays, just use 
 with a `Tuple` of `Array`.
 """
 module demo
-using MPICartesianGrid
+include(string(@__DIR__, "/../src/MPICartesianGrid.jl"))
+using .MPICartesianGrid
+#using MPICartesianGrid
 using MPI # this is not necessary, only for demo display purpose
 
 """
 MPI display is bad, this is just a display function for the demo
 """
 function display_array(array, grid)
-    println("\n")
+    get_rank(grid) == 0 && println("\n")
     nprocs = MPI.Comm_size(grid.comm)
     for r in 0:nprocs-1
         if get_rank(grid) == r
             println(grid.coords) # print the grid coordinates in the cartesian grid
-            display(transpose(array)) # display array
+            if array!==nothing
+                display(transpose(array)) # display array
+            else
+                print("nothing")
+            end
             println("\n")
         end
         MPI.Barrier(grid.comm)
@@ -39,15 +45,14 @@ for i in 1:nx, j in 1:ny
 end
 
 # Print the array before exchange
-println("\nBefore update_halo!\n")
+get_rank(grid) == 0 && println("\nBefore gather_array\n")
 display_array(array, grid)
 
-# Update halo !
-update_halo!(array, grid)
+globalArray = gather_array(array, grid)
 
 # Print array after exchange
-println("\nAfter update_halo!\n")
-display_array(array, grid)
+get_rank(grid) == 0 &&  println("\nAfter gather_array\n")
+display_array(globalArray, grid)
 
 # The end
 finalize_grid(grid)

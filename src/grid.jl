@@ -85,13 +85,13 @@ end
 DistributedGrid(comm::MPI.Comm, ndims::Int, nelts::Int, noverlaps::Int; init_MPI = true) = DistributedGrid(comm, (ndims,), (nelts,), (noverlaps,);  init_MPI)
 
 """
-    create_buffers(type, grid::DistributedGrid{D}, narrays::Int = 1) where D
+    create_buffers(grid::DistributedGrid{D}, type::Type = Float64, narrays::Int = 1) where D
 
 Create send/recv buffers for MPI exchange of `Array`'s of type `type`.
 
 `narrays` is the number of arrays that will be exchanged.
 """
-function create_buffers(grid::DistributedGrid{D}, type, narrays::Int = 1) where D
+function create_buffers(grid::DistributedGrid{D}, type::Type = Float64, narrays::Int = 1) where D
     coords = get_coords(grid)
     recv_buffer = Dict{Int,Vector{type}}()
 
@@ -280,3 +280,70 @@ function _is_true_neighbor(neighbor::NTuple{D,Int}, stencil::NTuple{D,Int}, grid
 end
 
 finalize_grid(::DistributedGrid; finalize_MPI = true) = finalize_MPI && MPI.Finalize()
+
+function gather_array(array::AbstractArray{T,D}, grid::DistributedGrid{D}, root::Integer = 0) where {T,D}
+
+    # gather data on root
+    all_nelts = MPI.Gather(get_nelts(grid), root, get_comm(grid))
+    all_coords = MPI.Gather(get_coords(grid), root, get_comm(grid))
+    if get_rank(grid) == root
+        # limitation : we use `Gather` for now, then we must check that
+        # all local array have the same size.
+        if !all(map(x->all_nelts[1]==x, all_nelts))
+            @show all_nelts
+            error("ERROR: all local arrays must have the same size.")
+        end
+        neltsGlobal = _compute_nelts_total(all_nelts, all_coords, grid)
+        arrayGlobal = zeros(eltype(array), neltsGlobal...)
+    end
+
+    # `Gather` is valid if all local array have the same size.
+    # We should implement `Gatherv` in the general case.
+    buffer = MPI.Gather(array[local_indices(grid)...], root, get_comm(grid))
+
+    if get_rank(grid) == root
+        offset_buffer = 0
+        globalIndices = _global_indices(all_nelts, all_coords, grid)
+        for rank in 1:length(all_nelts)
+            current_size = prod(all_nelts[rank])
+            arrayGlobal[globalIndices[all_coords[rank]...]...] .= reshape(buffer[offset_buffer .+ (1:current_size)], all_nelts[rank]...)
+            offset_buffer = offset_buffer + current_size
+        end
+        return arrayGlobal
+    else
+        return nothing
+    end
+end
+
+function _compute_nelts_per_rank_per_dim(neltsPerRank::AbstractVector{<:NTuple{D}}, coordsPerRank::AbstractVector{<:NTuple{D}}, grid::DistributedGrid{D}) where D
+    map(1:D) do idim
+        _nelts = zeros(Int, get_ndims(grid))
+        for (coord_k, nelts_k) in zip(coordsPerRank, neltsPerRank)
+            _nelts[coord_k...] = nelts_k[idim]
+        end
+        _nelts
+    end
+end
+
+"""
+Return the size of the global array obtain by gathering
+"""
+function _compute_nelts_total(neltsPerRank::AbstractVector{<:NTuple{D}}, coordsPerRank::AbstractVector{<:NTuple{D}}, grid::DistributedGrid{D}) where D
+    neltsPerRankPerDim = _compute_nelts_per_rank_per_dim(neltsPerRank, coordsPerRank, grid)
+    map(1:D) do idim
+        sum(neltsPerRankPerDim[idim], dims=idim)[1]
+    end
+end
+
+function _global_indices(neltsPerRank::AbstractVector{<:NTuple{D}}, coordsPerRank::AbstractVector{<:NTuple{D}}, grid::DistributedGrid{D}) where D
+    neltsPerRankPerCoord = _compute_nelts_per_rank_per_dim(neltsPerRank, coordsPerRank, grid)
+    rangePerRankPerCoord = zero.(neltsPerRankPerCoord)
+    globalIndicePerCoord= Array{NTuple{D,UnitRange}}(undef, size(neltsPerRankPerCoord[1])...)
+    for (idim, (_nelts, _range)) in enumerate(zip(neltsPerRankPerCoord, rangePerRankPerCoord))
+        _range .= accumulate(+,_nelts,dims=idim)
+    end
+    for i in eachindex(globalIndicePerCoord)
+        globalIndicePerCoord[i] = ntuple(idim->rangePerRankPerCoord[idim][i]-neltsPerRankPerCoord[idim][i]+1:rangePerRankPerCoord[idim][i], Val(D))
+    end
+    globalIndicePerCoord
+end
