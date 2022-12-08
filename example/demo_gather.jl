@@ -5,9 +5,9 @@ This demo synchronizes only one array. To synchronize multiple arrays, just use 
 with a `Tuple` of `Array`.
 """
 module demo
-include(string(@__DIR__, "/../src/MPICartesianGrid.jl"))
-using .MPICartesianGrid
-#using MPICartesianGrid
+#include(string(@__DIR__, "/../src/MPICartesianGrid.jl"))
+#using .MPICartesianGrid
+using MPICartesianGrid
 using MPI # this is not necessary, only for demo display purpose
 
 """

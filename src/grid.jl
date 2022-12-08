@@ -281,6 +281,12 @@ end
 
 finalize_grid(::DistributedGrid; finalize_MPI = true) = finalize_MPI && MPI.Finalize()
 
+"""
+    gather_array(a, grid::DistributedGrid, root::Integer = 0)
+
+Establish parallel communication to gather a distributed array (or a tuple
+of distributed arrays) `a` on the `root` processor.
+"""
 function gather_array(array::AbstractArray{T,D}, grid::DistributedGrid{D}, root::Integer = 0) where {T,D}
 
     # gather data on root
@@ -313,6 +319,10 @@ function gather_array(array::AbstractArray{T,D}, grid::DistributedGrid{D}, root:
     else
         return nothing
     end
+end
+
+function gather_array(t::NTuple{N,<:AbstractArray}, args...) where {N}
+    map(a->gather_array(a, args...), t)
 end
 
 function _compute_nelts_per_rank_per_dim(neltsPerRank::AbstractVector{<:NTuple{D}}, coordsPerRank::AbstractVector{<:NTuple{D}}, grid::DistributedGrid{D}) where D
