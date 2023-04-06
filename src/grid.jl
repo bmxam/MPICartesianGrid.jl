@@ -48,9 +48,9 @@ Iterators with neighbors stencil (in local reference, i.e `-1:1`) including the 
 in each topological dimension on each core (hence the total number of grid elements is `sum(ndims .* nelts)`). Finally,
 `noverlaps` is the number of elements overlaps (on both side of the topological direction) in each topological direction.
 """
-function DistributedGrid(ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::NTuple{D,Int}; init_MPI=true) where {D}
+function DistributedGrid(ndims::NTuple{D,Int}, nelts::NTuple{D,Int}, noverlaps::NTuple{D,Int}) where {D}
     # Init MPI if necessary
-    init_MPI && MPI.Init()
+    MPI.Initialized() || MPI.Init()
 
     # Preliminary check
     navail = MPI.Comm_size(MPI.COMM_WORLD)
